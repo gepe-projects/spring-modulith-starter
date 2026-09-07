@@ -1,3 +1,10 @@
 spring:
   application:
     name: spring-modulith-starter
+
+management:
+  tracing:
+    # Tracing is intentionally OFF in the starter (see agents.md §7 "Later
+    # enablement"). Set to true once a Micrometer tracing bridge / OTLP
+    # exporter is added; this also avoids proxying module beans meanwhile.
+    enabled: false

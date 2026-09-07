@@ -75,6 +75,12 @@
             <groupId>org.springframework.modulith</groupId>
             <artifactId>spring-modulith-starter-jpa</artifactId>
         </dependency>
+        <!-- Structured JSON logging (logback json profile, see agents.md §7) -->
+        <dependency>
+            <groupId>net.logstash.logback</groupId>
+            <artifactId>logstash-logback-encoder</artifactId>
+            <version>8.1</version>
+        </dependency>
 
         <dependency>
             <groupId>org.springframework.boot</groupId>
