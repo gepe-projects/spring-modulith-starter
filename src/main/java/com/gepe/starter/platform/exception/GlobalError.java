@@ -17,7 +17,9 @@ public enum GlobalError implements ErrorCode {
 
     // ── database ──
     DB_CONSTRAINT_VIOLATION(HttpStatus.CONFLICT, "db.constraint_violation"),
-    DB_DATA_INTEGRITY(HttpStatus.CONFLICT, "db.data_integrity"),
+    // Non-duplicate integrity failures are mapped to 400 by GlobalExceptionHandler
+    // (duplicate keys are the separate 409 code below); keep statuses in sync.
+    DB_DATA_INTEGRITY(HttpStatus.BAD_REQUEST, "db.data_integrity"),
     DB_DUPLICATE_ENTRY(HttpStatus.CONFLICT, "db.duplicate_entry"),
 
     // ── exception (generic) ──

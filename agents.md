@@ -20,6 +20,7 @@
 | Cache / secondary store | Redis |
 | Scheduler | Quartz (starter present; no job example yet) |
 | Verification | Spring Modulith via `ModularityTests` (see §8) |
+| Multi-instance | Clustered Quartz (JDBC), DB-backed event registry + staleness/restart republish, stateless instances — see §11 |
 
 Commands:
 
@@ -29,20 +30,26 @@ Commands:
 ./mvnw spring-boot:run   # run app locally (needs Postgres/Redis up)
 ```
 
-**Current state:** a Spring Initializr starter plus the `platform` module —
-started with only its `package-info.java`, it now also holds `web/`, `logging/`,
-`exception/`, `web/response/` and `i18n/`. Present today: `SpringModulithStarterApplication`
-registered with `@Modulith(sharedModules = "platform")`, `ModularityTests`, one
-context-load test (needs the local Postgres/Redis from §5 up — it connects via
-the dev defaults in `application.yaml`), request-scoped MDC logging
-(`CorrelationIdFilter` + `logback-spring.xml`, see §7), and the complete i18n +
-error-handling foundation of §2.4/§6: aggregated `MessageSource` + locale
-policy (default English), `MessageHelper`, `ErrorCode` contract with
+**Current state:** the `platform` module (shared, OPEN) holds `web/`,
+`logging/`, `exception/`, `web/response/` and `i18n/` — request-scoped MDC
+logging (`CorrelationIdFilter` + `logback-spring.xml`, §7) and the complete
+i18n + error-handling foundation of §2.4/§6: aggregated `MessageSource` +
+locale policy (default English), `MessageHelper`, `ErrorCode` contract with
 `GlobalError` + per-module error enums, `ServiceException` /
 `ValidationException`, `ApiResponse` / `ErrorResponse` / `ValidationError`
 envelopes, and the `GlobalExceptionHandler` (`@RestControllerAdvice`) that
 turns every Spring MVC and validation exception into the localized envelope.
-No feature modules and no `Dockerfile` yet.
+Plus the **example feature module `user`** (§2/§9 — create + read user with
+`api`/`internal` split, module error enum, module i18n bundle, event +
+listener, Flyway `V3`, behavior tests), a `README.md` quickstart, and the
+multi-instance configuration of §11 (Quartz clustered, event registry
+recovery, health groups). `SpringModulithStarterApplication` is registered
+with `@Modulith(sharedModules = "platform")`; `ModularityTests` verifies the
+real `user`-module boundaries. Context-load tests need the local Postgres/Redis
+from §5 up (dev defaults in `application.yaml`).
+Still planned: more feature modules, `Dockerfile`, `platform/config` &
+`platform/persistence` (cache manager, auditing/`BaseEntity`), further Quartz
+job examples, metrics/tracing enablement (§7), Spring Security.
 Everything below is **normative**: apply these conventions as modules, tests,
 and infrastructure are implemented. Pieces that are still planned are
 explicitly flagged "(planned)".
@@ -198,7 +205,9 @@ logic. Sub-packages (implemented unless marked "(planned)"):
 
 ```
 platform/
-├── config/          # (planned) @Configuration: Redis/cache manager, JPA auditing, scheduling
+├── config/          # (planned) @Configuration: Redis/cache manager (requires adding
+│   │                #   spring-boot-starter-cache; store MUST be Redis — §11),
+│   │                #   JPA auditing, scheduling
 ├── web/             # GlobalExceptionHandler (@RestControllerAdvice, §6), CorrelationIdFilter,
 │   │                #   WebConfig (LocaleResolver: Accept-Language, default English, §6)
 │   └── response/    # API envelopes: ApiResponse<T>, ErrorResponse, ValidationError (§6)
@@ -254,6 +263,9 @@ platform/
 - **Redis** is used for caching read paths: `@Cacheable`/`@CacheEvict` on
   service methods returning api DTOs (records). Cache manager, TTL, key
   serializers are configured once in `platform/config` — never per module.
+  (Not yet enabled: requires adding `spring-boot-starter-cache` +
+  `spring.cache.type: redis`; the store MUST be shared Redis, never an
+  in-process cache — instances must serve identical data, §11.)
 - **Flyway**: one migration per schema change under
   `src/main/resources/db/migration`, named `V<n>__<description>.sql`
   (`V1__create_user_table.sql`, `V2__create_order_table.sql`, …). Never edit an
@@ -274,7 +286,9 @@ platform/
     in `<module>.api/event/`). Consumers listen with
     `@TransactionalEventListener(phase = AFTER_COMMIT)` in their own
     `internal/listener`. Consumers still declare `allowedDependencies =
-    "<module>::API"` because they reference the event type.
+    "<module>::API"` because they reference the event type. Execution of such
+    listeners is tracked in `event_publication` and delivery is at-least-once
+    across instances — listeners must be idempotent (§11).
 - **No manual registration.** Components are picked up by component scanning;
   controllers are beans in `internal/delivery/http`. Do not hand-wire beans in
   `@Configuration` unless truly required.
@@ -604,3 +618,81 @@ Further test conventions:
   (§6).
 - *Logging?* SLF4J + MDC (`requestId`, …), parameterized messages, JSON-ready
   via logback profiles — OTel/Prometheus added later without code changes.
+- *Can the application run in multiple instances?* **Yes** — clustered Quartz,
+  DB-backed event registry with crash recovery, stateless instances; see §11.
+
+---
+
+## 11. Multi-instance (clustered) operation — normative
+
+The starter is designed and configured to run **several instances against the
+same PostgreSQL/Redis** (rolling deploys, scale-out). The rules below are
+binding; §1 state & `application.yaml` implement them. How to try it: run two
+instances, e.g. `./mvnw spring-boot:run -Dspring-boot.run.arguments=--server.port=8080`
+and `…--server.port=8081` (same DB/Redis), then create a user via one instance
+and read it via the other; watch the Quartz cluster in the logs.
+
+### 11.1 What is already safe (configuration)
+
+- **Scheduler — Quartz clustered.** JDBC job store (`job-store-type: jdbc`,
+  `initialize-schema: never`; tables from `V2__quartz_tables.sql`), one shared
+  `scheduler-name: appScheduler`, `instanceId: AUTO`, `isClustered: true`,
+  `acquireTriggersWithinLock: true` (recommended for PostgreSQL). Quartz
+  guarantees each trigger fires on exactly one instance. **Never use
+  `@Scheduled`** — every instance would fire. Scheduled work = Quartz job.
+- **Modulith events — DB-backed registry.** Publishing an event writes one
+  `event_publication` row per transactional listener **in the same transaction**
+  (`V1__event_publication.sql`); completion is recorded after the listener ran.
+  Crash recovery across instances (`application.yaml`):
+  - `republish-outstanding-events-on-restart: true` — on startup **any**
+    instance republishes every publication that is not `COMPLETED` (including
+    rows left by a crashed instance).
+  - `spring.modulith.events.staleness.*` (non-zero → monitor active) — each
+    instance periodically marks publications stuck in `PUBLISHED` /
+    `PROCESSING` / `RESUBMITTED` longer than the configured duration as
+    `FAILED`.
+  - **Automatic resubmission of FAILED publications** — the platform job
+    `platform/modulith/EventPublicationResubmission*` re-delivers FAILED
+    publications every 5 minutes through the clustered Quartz scheduler
+    (exactly one instance; ≤10 listener attempts, min age 1 min, bounded
+    batches). Listeners recover without waiting for a restart.
+  - **Delivery is at-least-once and may duplicate** (crash between commit and
+    listener, resubmission racing a slow listener). **Listeners must be
+    idempotent.** The example `UserEventListener` is log-only on purpose.
+  - Housekeeping: completed rows accumulate (completion mode `UPDATE`).
+    For production, either set `spring.modulith.events.completion-mode: DELETE`
+    or purge periodically via the `CompletedEventPublications` bean.
+- **Flyway — concurrent boots safe.** PostgreSQL advisory locks serialize
+  migrations across instances that start at the same time.
+- **Database constraints are the cross-instance truth.** Uniqueness etc. is
+  enforced by the database (e.g. `users.email`, `V3`); the service flushes
+  after save so the constraint fires inside the transaction and the
+  `GlobalExceptionHandler` maps it to a clean 409. Application-level pre-checks
+  (e.g. `existsByEmail` before insert) race across instances and are **not**
+  a substitute.
+- **Health/readiness** — the readiness group includes `db` and `redis`, so a
+  lost dependency takes the instance out of load-balancer rotation.
+
+### 11.2 Rules for new code
+
+1. **No `@Scheduled`** — Quartz jobs only. First example in the repo: the
+   platform `modulithEventPublicationResubmission` job (see 11.1).
+2. **No in-process state that must be shared**: no local caches, no
+   `static` mutable state, no in-memory queues. MDC and request-scoped values
+   never survive a request; async work (listeners, jobs) must set/restore MDC
+   explicitly (§7).
+3. **Caching (later) must use Redis** — when `@Cacheable`/`@CacheEvict` are
+   added (requires `spring-boot-starter-cache` + `spring.cache.type: redis`,
+   configured once in `platform/config`), the store is shared Redis, never an
+   in-process cache: every instance must serve identical data. Cache only
+   read paths returning api DTO records.
+4. **Idempotent event listeners** (11.1) and idempotent jobs: effects that must
+   happen exactly once need a DB-backed guard (e.g. unique constraint), not an
+   in-memory flag.
+5. **No instance affinity**: anything addressable (files, temp storage, uploads)
+   must live outside the instance or be documented as unsupported. No
+   `Dockerfile`/container artifacts inside modules; the only container artifact
+   is the root `Dockerfile` (planned, §4).
+6. Instance identity (logs, cluster) comes from config/env — never hard-code a
+   port, host or instance name in code.
+

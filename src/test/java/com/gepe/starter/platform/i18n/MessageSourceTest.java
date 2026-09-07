@@ -33,7 +33,9 @@ class MessageSourceTest {
     @Test
     void registersGlobalBundleFirstThenModuleBundlesAlphabetically() throws IOException {
         assertThat(I18nConfig.discoverBasenames())
-                .containsExactly("i18n/messages/messages", "i18n/testmodule/messages");
+                .containsExactly("i18n/messages/messages",
+                        "i18n/testmodule/messages", // test fixture under src/test/resources
+                        "i18n/user/messages");      // example feature module bundle
     }
 
     @Test

@@ -94,12 +94,25 @@ public class GlobalExceptionHandler {
         return badRequestValidation(errors);
     }
 
-    /** Method validation of controller parameters ({@code @Validated} + constraints). */
+    /**
+     * Method validation of controller parameters ({@code @Validated} +
+     * constraints on {@code @RequestParam}/{@code @PathVariable}/…). Each
+     * {@code ParameterValidationResult} carries its resolvable errors; they are
+     * resolved through the aggregated MessageSource with the request locale
+     * (via {@link MessageHelper#get(org.springframework.context.MessageSourceResolvable)}),
+     * so the response keeps the same per-field {@code errors} contract as
+     * body validation instead of an empty list.
+     */
     @ExceptionHandler(HandlerMethodValidationException.class)
     ResponseEntity<ErrorResponse> handleHandlerMethodValidation(HandlerMethodValidationException ex) {
-        log.debug("Handler method validation failed on {} parameter(s)",
-                ex.getParameterValidationResults().size());
-        return badRequestValidation(List.of());
+        List<ValidationError> errors = ex.getParameterValidationResults().stream()
+                .flatMap(result -> result.getResolvableErrors().stream()
+                        .map(resolvable -> new ValidationError(
+                                String.valueOf(result.getMethodParameter().getParameterName()),
+                                messageHelper.get(resolvable))))
+                .toList();
+        log.debug("Handler method validation failed on {} parameter(s)", ex.getParameterValidationResults().size());
+        return badRequestValidation(errors);
     }
 
     /** Constraint violations raised by {@code @Validated} on services/beans. */
