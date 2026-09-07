@@ -5,6 +5,7 @@ import com.gepe.starter.platform.logging.MdcKeys;
 import java.io.IOException;
 import java.util.UUID;
 
+import com.github.f4b6a3.uuid.UuidCreator;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -42,7 +43,7 @@ public class CorrelationIdFilter extends OncePerRequestFilter {
 
         String requestId = request.getHeader(CORRELATION_ID_HEADER);
         if (requestId == null || requestId.isBlank()) {
-            requestId = UUID.randomUUID().toString();
+            requestId = UuidCreator.getTimeOrderedEpoch().toString();
         }
 
         MDC.put(MdcKeys.REQUEST_ID, requestId);

@@ -33,8 +33,9 @@ Commands:
 started with only its `package-info.java`, it now also holds `web/` and
 `logging/`. Present today: `SpringModulithStarterApplication` registered with
 `@Modulith(sharedModules = "platform")`, `ModularityTests`, one context-load
-test (activated on the `local` profile — needs the local Postgres/Redis from
-§5), and request-scoped MDC logging (`CorrelationIdFilter` +
+test (needs the local Postgres/Redis from §5 up — it connects via the dev
+defaults in `application.yaml`), and request-scoped MDC logging
+(`CorrelationIdFilter` +
 `logback-spring.xml`, see §7). No feature modules, no i18n beans, and no
 `Dockerfile` yet. Everything below is **normative**: apply these conventions as
 modules, tests, and infrastructure are implemented. Pieces that are still
@@ -218,6 +219,18 @@ platform/
 - JPA repositories extend `JpaRepository` / `JpaSpecificationExecutor` and live
   in `internal/repository`. Entities live in `internal/entity` and extend the
   platform `BaseEntity` when audit columns are wanted.
+- **Identifiers: UUID v7, generated in the application.** Every generated id is
+  a **UUID v7** created with `UuidCreator.getTimeOrderedEpoch()` (dependency
+  `com.github.f4b6a3:uuid-creator`) — never `UUID.randomUUID()` (v4) and never
+  a DB-generated `@GeneratedValue` id. The database column is `uuid`, filled
+  from the application.
+  **Exception:** small, non-confidential reference/lookup tables (few rows,
+  nothing sensitive) may use a plain `identity` surrogate key instead.
+- **Enums live in the application only — never as a database enum type.**
+  Persist an enum by its name in a text column (`@Enumerated(EnumType.STRING)`
+  / a `varchar` column whose values the application or API layer validates).
+  Adding a new enum constant then never requires a Flyway migration. Native DB
+  enum types are forbidden.
 - **Transactions** belong to the facade/service boundary
   (`@Transactional` on the implementation in `internal/service`), not on
   repositories or controllers. Cross-module calls are plain synchronous method
@@ -228,8 +241,11 @@ platform/
 - **Flyway**: one migration per schema change under
   `src/main/resources/db/migration`, named `V<n>__<description>.sql`
   (`V1__create_user_table.sql`, `V2__create_order_table.sql`, …). Never edit an
-  applied migration. The Modulith event-publication table is managed by
-  `spring-modulith-starter-jpa` automatically — no manual DDL for it.
+  applied migration. Because Flyway manages the schema, the Modulith
+  `event_publication` table is **not** auto-created — provide a migration for
+  it (`V1__event_publication.sql` already exists); same for the Quartz `QRTZ_*`
+  tables (`V2__quartz_tables.sql`), since `spring.quartz.jdbc.initialize-schema`
+  is `never`.
 - **HTTP API**: base path `/api/v1/...`; every response body is an envelope
   `ApiResponse<T>` from `platform.tools`; errors are produced by
   `GlobalExceptionHandler` (see §6). Response DTOs are wrapped in
@@ -255,8 +271,7 @@ src/
 ├── main/
 │   ├── java/com/gepe/starter/...        # modules: platform, <feature modules>
 │   └── resources/
-│       ├── application.yaml             # core config (Spring Boot 4)
-│       ├── application-local.yaml       # local dev defaults, profile `local` (§5)
+│       ├── application.yaml             # core config (Spring Boot 4) incl. dev defaults (§5)
 │       ├── db/migration/                # Flyway: V1__..., V2__... (created w/ first module)
 │       ├── i18n/                        # see §6
 │       └── logback-spring.xml           # logging: console default + `json` profile (§7)
@@ -275,13 +290,17 @@ infrastructure lives either in `platform` (code) or at the repository root.
   Redis are provided externally: they are already running locally (user-managed
   Docker containers outside this repo). The only container artifact in the repo
   is a `Dockerfile` at the repository root that packages the application.
-- Local dev connection defaults (dev only — override via `SPRING_*` env vars,
-  never hard-code credentials into `application.yaml`):
+- Local dev connection defaults are configured directly in
+  `src/main/resources/application.yaml`, each wrapped in a `${VAR:default}`
+  placeholder so every value can be overridden via the matching `SPRING_*`
+  environment variable at run time. Never commit real secrets — use env vars in
+  shared/CI environments:
   - PostgreSQL on `localhost:5432`, database **`starter-modulith`**,
-    username/password **`root`**/`root`.
-  - Redis on `localhost:6379`, password **`root`**.
-- These defaults live in `src/main/resources/application-local.yaml` and are
-  activated by the `local` profile (already used by the context-load test).
+    username/password **`root`**/`root` (`SPRING_DATASOURCE_URL`,
+    `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD`).
+  - Redis on `localhost:6379`, username/password **`root`**/`root`
+    (`SPRING_DATA_REDIS_HOST`, `SPRING_DATA_REDIS_PORT`,
+    `SPRING_DATA_REDIS_USERNAME`, `SPRING_DATA_REDIS_PASSWORD`).
 - Integration/slice tests that need Postgres/Redis use the same running local
   services (see §8) — start them before running tests.
 
@@ -359,10 +378,12 @@ Rules for every log statement:
 Correlation context (MDC) — implemented in `platform`:
 
 - `CorrelationIdFilter` (`platform/web`, a `@Component` filter bean at highest
-  precedence) reads `X-Request-Id` or generates a UUID, stores it in MDC under
-  **`requestId`** and echoes it back in the response header (`X-Request-Id`).
-  Every log line inside the request carries it. MDC key constants live in
-  `platform/logging/MdcKeys`; the filter removes the key in a `finally` block.
+  precedence) reads `X-Request-Id` or generates a UUID v7
+  (`UuidCreator.getTimeOrderedEpoch()`, see §3 for the id policy), stores it in
+  MDC under **`requestId`** and echoes it back in the response header
+  (`X-Request-Id`). Every log line inside the request carries it. MDC key
+  constants live in `platform/logging/MdcKeys`; the filter removes the key in a
+  `finally` block.
 - Additional MDC keys when meaningful: `userId` (after authentication) and
   `module`. Never write to MDC without clearing it afterwards.
 - Async work (Quartz jobs, listeners, thread pools) must set/restore MDC
