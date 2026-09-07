@@ -30,16 +30,22 @@ Commands:
 ```
 
 **Current state:** a Spring Initializr starter plus the `platform` module —
-started with only its `package-info.java`, it now also holds `web/` and
-`logging/`. Present today: `SpringModulithStarterApplication` registered with
-`@Modulith(sharedModules = "platform")`, `ModularityTests`, one context-load
-test (needs the local Postgres/Redis from §5 up — it connects via the dev
-defaults in `application.yaml`), and request-scoped MDC logging
-(`CorrelationIdFilter` +
-`logback-spring.xml`, see §7). No feature modules, no i18n beans, and no
-`Dockerfile` yet. Everything below is **normative**: apply these conventions as
-modules, tests, and infrastructure are implemented. Pieces that are still
-planned are explicitly flagged "(planned)".
+started with only its `package-info.java`, it now also holds `web/`, `logging/`,
+`exception/`, `web/response/` and `i18n/`. Present today: `SpringModulithStarterApplication`
+registered with `@Modulith(sharedModules = "platform")`, `ModularityTests`, one
+context-load test (needs the local Postgres/Redis from §5 up — it connects via
+the dev defaults in `application.yaml`), request-scoped MDC logging
+(`CorrelationIdFilter` + `logback-spring.xml`, see §7), and the complete i18n +
+error-handling foundation of §2.4/§6: aggregated `MessageSource` + locale
+policy (default English), `MessageHelper`, `ErrorCode` contract with
+`GlobalError` + per-module error enums, `ServiceException` /
+`ValidationException`, `ApiResponse` / `ErrorResponse` / `ValidationError`
+envelopes, and the `GlobalExceptionHandler` (`@RestControllerAdvice`) that
+turns every Spring MVC and validation exception into the localized envelope.
+No feature modules and no `Dockerfile` yet.
+Everything below is **normative**: apply these conventions as modules, tests,
+and infrastructure are implemented. Pieces that are still planned are
+explicitly flagged "(planned)".
 
 ---
 
@@ -169,7 +175,7 @@ package com.gepe.starter.platform;
 Why `OPEN` alone is enough here:
 
 - **Incoming:** an OPEN module does not hide internals — *all* its sub-packages
-  (`config`, `web`, `exception`, `tools`, …) are accessible from every other
+  (`config`, `web`, `exception`, `i18n`, …) are accessible from every other
   module, with no `@NamedInterface` needed.
 - **Cycles:** OPEN modules are excluded from Modulith cycle detection, which is
   correct for cross-cutting infrastructure.
@@ -188,16 +194,19 @@ Two conventions stay binding even though Modulith no longer machine-checks them
    own `allowedDependencies`.
 
 `platform` contains cross-cutting, framework-level code only — no business
-logic. Planned sub-packages:
+logic. Sub-packages (implemented unless marked "(planned)"):
 
 ```
 platform/
-├── config/          # @Configuration: Redis/cache manager, JPA auditing, scheduling, web
-├── web/             # GlobalExceptionHandler (@RestControllerAdvice), CorrelationIdFilter, web config
-├── exception/       # PlatformException + typed subclasses (uses error codes, see §6)
-├── tools/           # ApiResponse<T>, PageResponse<T>, small framework helpers
-├── i18n/            # (planned) single aggregated MessageSource + key conventions
-├── persistence/     # BaseEntity (@MappedSuperclass) + auditing support
+├── config/          # (planned) @Configuration: Redis/cache manager, JPA auditing, scheduling
+├── web/             # GlobalExceptionHandler (@RestControllerAdvice, §6), CorrelationIdFilter,
+│   │                #   WebConfig (LocaleResolver: Accept-Language, default English, §6)
+│   └── response/    # API envelopes: ApiResponse<T>, ErrorResponse, ValidationError (§6)
+├── exception/       # ErrorCode contract, GlobalError (shared codes), ServiceException,
+│                    #   ValidationException — modules add their own ErrorCode enums (§6)
+├── i18n/            # I18nConfig (aggregated MessageSource, bean name "messageSource"),
+│                    #   MessageHelper helper (§6)
+├── persistence/     # (planned) BaseEntity (@MappedSuperclass) + auditing support
 └── logging/         # MDC key constants / helpers (see §7)
 ```
 
@@ -208,10 +217,17 @@ platform/
 
 ## 3. Implementation conventions (Java)
 
-- **DTOs, commands, events, and api results are `record`s** (immutable). JPA
-  entities are **not** records — use Lombok (`@Getter`, `@Setter`,
+- **Lombok is the convention for standard class boilerplate.** Use `@Slf4j`
+  for loggers, `@RequiredArgsConstructor` for constructor injection, and
+  `@Getter` (plus `@Setter`, `@Builder`, `@NoArgsConstructor` /
+  `@AllArgsConstructor` as needed) on mutable classes and enums. Do not
+  hand-write these — hand-written boilerplate is not "more readable", it only
+  diverges from the ecosystem convention (same style as the
+  `spring-boot-starter-auth` project). Never `System.out`.
+- **DTOs, commands, events, api results, and response envelopes are
+  `record`s** (immutable) — records stay plain Java, no Lombok. JPA entities
+  are **not** records — use Lombok (`@Getter`, `@Setter`,
   `@NoArgsConstructor` / `@AllArgsConstructor`, `@Builder`) as appropriate.
-- Loggers: Lombok `@Slf4j` or an explicit SLF4J logger. Never `System.out`.
 - Bean validation lives **on HTTP request DTOs** in `internal/delivery/http/req`.
   Prefer built-in constraints; when a specific message is needed, reference a
   message key: `@NotBlank(message = "{user.validation.name.required}")`.
@@ -247,9 +263,10 @@ platform/
   tables (`V2__quartz_tables.sql`), since `spring.quartz.jdbc.initialize-schema`
   is `never`.
 - **HTTP API**: base path `/api/v1/...`; every response body is an envelope
-  `ApiResponse<T>` from `platform.tools`; errors are produced by
-  `GlobalExceptionHandler` (see §6). Response DTOs are wrapped in
-  `internal/delivery/http/res`.
+  from `platform.web.response` — `ApiResponse<T>(message, data)` on success
+  and `ErrorResponse(code, message, errors)` on failure (both implemented, see
+  §6); errors are produced by `GlobalExceptionHandler` (see §6). Response DTOs
+  are wrapped in `internal/delivery/http/res`.
 - **Inter-module communication**:
   - *Synchronous* — facade in `<module>.api`; consumer declares
     `allowedDependencies = "<module>::API"`.
@@ -308,7 +325,10 @@ infrastructure lives either in `platform` (code) or at the repository root.
 
 ## 6. i18n conventions
 
-Physical layout — **one folder for app-wide messages, one folder per module**:
+Physical layout — **one folder for app-wide messages, one folder per module**
+(`src/main/resources/i18n/messages/messages.properties` exists and is the
+current catalogue: `common.*`, `http.*`, `db.*`, `file.*`, `pagination.*`,
+`system.*`, `validation.failed`, and the Jakarta/Hibernate constraint keys):
 
 ```
 src/main/resources/i18n/
@@ -329,32 +349,107 @@ Rules:
 - **File naming:** every folder holds files named `messages.properties` (the
   default/English bundle) plus `messages_<lang>.properties` for other languages
   (e.g. `messages_id.properties`). The folder only decides *who owns the keys*;
-  a MessageSource registers one basename per folder: `i18n/<folder>/messages`.
+  the MessageSource registers one basename per folder: `i18n/<folder>/messages`.
 - **`messages` is global/app-wide** — it owns generic *validation*, *HTTP* and
   *non-module errors* only. Examples: `jakarta.validation.constraints.NotNull.message`,
-  `error.validation.request-invalid`, `error.http.404`, `error.internal`.
-  **Never put module-specific text here.**
+  `validation.failed`, `http.not_found`, `system.error`,
+  `db.duplicate_entry`. **Never put module-specific text here.**
 - **Module folders own everything about their module** (file
   `i18n/user/messages.properties`), keys prefixed with the module name:
   `user.not-found=User with id {0} was not found`,
   `user.validation.name.required=Name is required`.
   **Never put non-module text in a module folder.**
 - Key collision is a bug: keys in `messages` have no prefix; keys in a module
-  folder MUST start with `<module>.`.
-- The app resolves every message through **one aggregated `MessageSource`**
-  (a bean in `platform/i18n`, planned) that registers all basenames found under
-  `i18n/*/` — global `messages` first, then modules alphabetically — with
-  UTF-8 encoding. Code (controllers, exception handler, listeners) never reads
-  `ResourceBundle` directly; it always injects the single `MessageSource` /
-  a small `MessageResolver` helper.
-- **Default locale is English.** Do not rely on the system locale;
-  `Accept-Language` selects the language (English when absent/unsupported).
-- **Errors are localized by code, not by exception class per module.** Feature
-  modules throw platform exceptions with a code:
-  `throw new NotFoundException("user.not-found", userId);` The
-  `GlobalExceptionHandler` (platform) resolves the code through the aggregated
-  MessageSource, so the *text* stays in the owning module's bundle while the
+  folder MUST start with `<module>.`. Values may carry `{0}`, `{1}`…
+  placeholders for message arguments.
+- The app resolves every message through **one aggregated `MessageSource`**:
+  `I18nConfig` (`platform/i18n`) exposes a bean **named exactly `messageSource`**
+  (Boot's auto-configuration then backs off) that registers one basename per
+  folder found under the classpath directory `i18n` — global `messages` first,
+  then module folders alphabetically — encoded UTF-8, default locale English,
+  no fallback to the system locale. Adding a module folder needs **no config
+  change** (discovery is automatic). Code never reads `ResourceBundle`
+  directly; it injects the `MessageSource` or the small `MessageHelper`
+  component (`get(code, args…)` — resolves for the current request locale;
+  missing keys are logged and the key itself is returned so typos surface
+  fast).
+- **Default locale is English.** `WebConfig` (`platform/web`) registers an
+  `AcceptHeaderLocaleResolver`: `Accept-Language` selects the language among
+  the configured supported locales (today only English); a missing or
+  unsupported header falls back to English, never to the system locale.
+  Extend the supported list only together with the matching
+  `messages_<lang>.properties` bundles.
+- **Validation messages flow through the same source.** Boot's auto-configured
+  validator interpolates constraint messages against the context
+  `messageSource` with the request locale (verified on Boot 4.1.1), so the
+  constraint keys above and module keys referenced from annotations
+  (`@NotBlank(message = "{user.validation.name.required}")`) localize without
+  extra wiring.
+
+Error codes, envelope & handling — one advice (`platform/web/GlobalExceptionHandler`)
+for the whole application; modules must not define their own:
+
+- **Every module declares its own error enum implementing the `ErrorCode`
+  contract** (`platform/exception`): one constant = HTTP status + message key.
+  Put it in `internal/exception/<Module>Error.java` next to its bundle, e.g.
+  for module `user`:
+
+  ```java
+  public enum UserError implements ErrorCode {
+      USER_NOT_FOUND(HttpStatus.NOT_FOUND, "user.not-found"),
+      NICKNAME_TAKEN(HttpStatus.CONFLICT, "user.nickname_taken");
+      // + fields/constructor/getters implementing ErrorCode
+  }
+  ```
+
+  Error codes are **not** global: `GlobalError` (`platform/exception`) holds
+  only genuinely cross-cutting codes (database conflicts, `system.error`,
+  …) that every module may reuse. Never add module-specific errors there.
+- **Throw one exception type:** `throw new ServiceException(UserError.USER_NOT_FOUND, userId);`
+  The advice reads the status and the message key from the error code and
+  resolves the key (with its `{0}`, `{1}`… arguments) through the aggregated
+  MessageSource — so the *text* stays in the owning module's bundle while the
   handling code stays in platform (no platform → module dependency).
+  Service-layer field validations use `ValidationException(List<ValidationError>)`
+  with already-localized messages (resolved via `MessageHelper` at the throw
+  site).
+- **Envelope** (in `platform/web/response`): success is
+  `ApiResponse<T>(message, data)`; every failure is
+  `ErrorResponse(code, message, errors)`:
+  - `code` — stable, machine-readable error identifier. It always equals the
+    resolved message key (e.g. `user.not-found`, `validation.failed`,
+    `db.duplicate_entry`) and is what frontends use for branching logic.
+    Message keys are therefore **public API**: renaming a key is a breaking
+    change. Never derive logic from parsing `message`.
+  - `message` — localized headline; the one text frontends render (toast /
+    banner). Always present.
+  - `errors` — `[{field, message}]`, present **only** for per-field validation
+    failures (400), `null` otherwise. Form UIs bind these to inputs; other
+    consumers just show `message`.
+  Per-field text from bean validation comes from
+  `FieldError.getDefaultMessage()` / `ConstraintViolation.getMessage()` and is
+  already localized. `null` fields are omitted from the JSON body
+  (`@JsonInclude(NON_NULL)`).
+- The advice maps **framework and validation exceptions** to codes from the
+  app-wide bundle: validation (`MethodArgumentNotValidException`/`BindException`,
+  `HandlerMethodValidationException`, `ConstraintViolationException`,
+  `ValidationException`) → 400 `validation.failed` + `errors`; malformed body
+  with a Jackson format problem → 400 `validation.failed` + one field error
+  (`http.invalid_enum_field` / `http.invalid_field_value` text), plain
+  malformed body → 400 `http.bad_request`; type mismatch → 400
+  `http.invalid_param_value`; missing parameter → 400 `http.parameter_required`;
+  no handler → 404 `http.not_found`; wrong method →
+  405 `http.method_not_allowed`; media type problems → 406/415; upload too
+  large → 413 `file.too_large`; `DataIntegrityViolationException` → 409
+  `db.duplicate_entry` (duplicate) or 400 `db.data_integrity`;
+  `OptimisticLockingFailureException` → 409 `exception.optimistic_lock`;
+  anything unexpected → 500 `system.error` (logged `error` with stack; the
+  client never sees internals). Add security handlers (e.g. access denied)
+  together with the Spring Security dependency once it arrives.
+- Logging policy inside the advice: expected business outcomes and validation
+  failures → `debug`; contract violations (4xx) → `warn` without stack trace;
+  unexpected failures → `error` with the full stack trace. The MDC `requestId`
+  is present on every line.
 
 ---
 
@@ -365,6 +460,8 @@ Scope for this starter: **best-practice logging now, structured so OpenTelemetry
 
 Rules for every log statement:
 
+- Loggers are declared with Lombok `@Slf4j` (see §3) — the logger name comes
+  from the class package automatically; never hand-write a Logger field.
 - Log at the right level: `debug` for detail, `info` for lifecycle/business
   milestones, `warn` for recoverable anomalies, `error` for failures (always
   pass the exception as last argument to keep the stack trace).
@@ -474,7 +571,9 @@ Further test conventions:
    controller. Add extra `internal` sub-packages only if genuinely needed.
 4. Create `src/main/resources/i18n/<module>/messages.properties` (English
    default; more languages as `messages_<lang>.properties`) and prefix every
-   key with `<module>.`.
+   key with `<module>.`. Declare the module's error codes as
+   `<Module>Error implements ErrorCode` in `internal/exception/` (§6) so
+   services throw `new ServiceException(<Module>Error.X, args…)`.
 5. Add a Flyway migration if the module owns new tables.
 6. If another module must consume this module, add `"<module>::API"` to that
    consumer's `allowedDependencies`.
