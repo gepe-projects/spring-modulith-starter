@@ -60,8 +60,14 @@ class MessageSourceTest {
     }
 
     @Test
+    void resolvesIndonesianBundleForTheIdLocale() {
+        assertThat(messages.getMessage("common.created", null, Locale.forLanguageTag("id")))
+                .isEqualTo("Data berhasil dibuat");
+    }
+
+    @Test
     void fallsBackToEnglishForUnsupportedLocales() {
-        for (Locale locale : List.of(Locale.forLanguageTag("id"), Locale.GERMAN, Locale.FRENCH)) {
+        for (Locale locale : List.of(Locale.GERMAN, Locale.FRENCH)) {
             assertThat(messages.getMessage("common.created", null, locale))
                     .as("resolution for %s", locale)
                     .isEqualTo("Data created successfully");

@@ -31,25 +31,30 @@ Commands:
 ```
 
 **Current state:** the `platform` module (shared, OPEN) holds `web/`,
-`logging/`, `exception/`, `web/response/` and `i18n/` — request-scoped MDC
-logging (`CorrelationIdFilter` + `logback-spring.xml`, §7) and the complete
-i18n + error-handling foundation of §2.4/§6: aggregated `MessageSource` +
-locale policy (default English), `MessageHelper`, `ErrorCode` contract with
-`GlobalError` + per-module error enums, `ServiceException` /
-`ValidationException`, `ApiResponse` / `ErrorResponse` / `ValidationError`
-envelopes, and the `GlobalExceptionHandler` (`@RestControllerAdvice`) that
-turns every Spring MVC and validation exception into the localized envelope.
-Plus the **example feature module `user`** (§2/§9 — create + read user with
-`api`/`internal` split, module error enum, module i18n bundle, event +
-listener, Flyway `V3`, behavior tests), a `README.md` quickstart, and the
+`logging/`, `exception/`, `web/response/`, `i18n/` and `config/` —
+request-scoped MDC logging (`CorrelationIdFilter` + `logback-spring.xml`, §7),
+the complete i18n + error-handling foundation of §2.4/§6 (aggregated
+`MessageSource` + locale policy — default English, Indonesian (`id`)
+officially supported, §6), the `ErrorCode` contract with `GlobalError` +
+per-module error enums, `ServiceException` / `ValidationException`,
+`ApiResponse` / `ErrorResponse` / `ValidationError` envelopes, the
+`GlobalExceptionHandler` (`@RestControllerAdvice`) that turns every Spring MVC
+and validation exception into the localized envelope, and the Redis-backed
+cache infrastructure of §3/§11.2 (`CacheConfig` + module `CacheSpec`
+declarations, typed JSON serializers, per-cache TTL, transaction-aware
+manager). Plus the **example feature module `user`** (§2/§9 — create + read
+user with `api`/`internal` split, module error enum, module i18n bundles
+(en + id), event + listener, Flyway `V3`, a `@Cacheable`/`@CacheEvict` read
+path on Redis, behavior tests), a `README.md` quickstart, and the
 multi-instance configuration of §11 (Quartz clustered, event registry
-recovery, health groups). `SpringModulithStarterApplication` is registered
-with `@Modulith(sharedModules = "platform")`; `ModularityTests` verifies the
-real `user`-module boundaries. Context-load tests need the local Postgres/Redis
+recovery, graceful shutdown, health groups).
+`SpringModulithStarterApplication` is registered with
+`@Modulith(sharedModules = "platform")`; `ModularityTests` verifies the real
+`user`-module boundaries. Context-load tests need the local Postgres/Redis
 from §5 up (dev defaults in `application.yaml`).
-Still planned: more feature modules, `Dockerfile`, `platform/config` &
-`platform/persistence` (cache manager, auditing/`BaseEntity`), further Quartz
-job examples, metrics/tracing enablement (§7), Spring Security.
+Still planned: `platform/persistence` (auditing/`BaseEntity`), more feature
+modules & Quartz job examples, a pagination pattern, `Dockerfile`,
+metrics/tracing enablement (§7), Spring Security.
 Everything below is **normative**: apply these conventions as modules, tests,
 and infrastructure are implemented. Pieces that are still planned are
 explicitly flagged "(planned)".
@@ -104,7 +109,8 @@ src/main/java/com/gepe/starter/<module>/
   interface* and blur the boundary.
 - Additional `internal` sub-packages are allowed when needed, e.g.
   `internal/listener/` for event listeners, `internal/mapper/` for
-  req/res ⇄ api-dto mappers. Keep the minimum list above for every module that
+  req/res ⇄ api-dto mappers, `internal/config/` for the module's `CacheSpec`
+  declarations (§3). Keep the minimum list above for every module that
   exposes HTTP.
 - Package and module names: lowercase singular nouns (`user`, `order`,
   `notification`, `payment`, …). The module `id` used in annotations must match
@@ -205,9 +211,11 @@ logic. Sub-packages (implemented unless marked "(planned)"):
 
 ```
 platform/
-├── config/          # (planned) @Configuration: Redis/cache manager (requires adding
-│   │                #   spring-boot-starter-cache; store MUST be Redis — §11),
-│   │                #   JPA auditing, scheduling
+├── config/          # CacheConfig (@EnableCaching, Redis CacheManager built from
+│   │                #   module CacheSpec declarations: per-cache TTL, typed JSON
+│   │                #   serializers, key prefix, transaction-aware eviction —
+│   │                #   the ONLY cache configuration point, §3/§11.2) +
+│   │                #   CacheSpec (declaration record modules provide)
 ├── web/             # GlobalExceptionHandler (@RestControllerAdvice, §6), CorrelationIdFilter,
 │   │                #   WebConfig (LocaleResolver: Accept-Language, default English, §6)
 │   └── response/    # API envelopes: ApiResponse<T>, ErrorResponse, ValidationError (§6)
@@ -261,11 +269,20 @@ platform/
   repositories or controllers. Cross-module calls are plain synchronous method
   calls on the other module's facade bean — no HTTP between modules.
 - **Redis** is used for caching read paths: `@Cacheable`/`@CacheEvict` on
-  service methods returning api DTOs (records). Cache manager, TTL, key
-  serializers are configured once in `platform/config` — never per module.
-  (Not yet enabled: requires adding `spring-boot-starter-cache` +
-  `spring.cache.type: redis`; the store MUST be shared Redis, never an
-  in-process cache — instances must serve identical data, §11.)
+  service methods returning api DTOs (records). The cache manager, key
+  prefix, per-cache TTL and the typed JSON serializers are configured exactly
+  once, in `platform/config` (`CacheConfig`, see §2.4) — never per module.
+  A module declares its caches as `CacheSpec` beans (`internal/config`, one
+  cache name = one value type = one TTL); `CacheConfig` collects them and
+  fails fast on undeclared cache names (typo in `@Cacheable`) or non-record
+  value types. No extra starter dependency is needed: the abstraction comes
+  from Spring (`@EnableCaching`), the store from `spring-data-redis`.
+  Cache only read paths returning api DTO records; the store MUST be shared
+  Redis, never an in-process cache — instances must serve identical data,
+  §11. Eviction from mutating operations is transaction-aware and
+  *eventually* visible across instances (delete reaches the shared store
+  asynchronously, ms scale): never assume a cache is empty synchronously
+  after a write, and always keep the TTL as the safety net (§11.2).
 - **Flyway**: one migration per schema change under
   `src/main/resources/db/migration`, named `V<n>__<description>.sql`
   (`V1__create_user_table.sql`, `V2__create_order_table.sql`, …). Never edit an
@@ -348,10 +365,11 @@ current catalogue: `common.*`, `http.*`, `db.*`, `file.*`, `pagination.*`,
 src/main/resources/i18n/
 ├── messages/
 │   ├── messages.properties        # DEFAULT locale (English) — app-wide keys only
-│   └── messages_id.properties     # optional example of a second language
+│   └── messages_id.properties     # Indonesian — supported locale (see WebConfig)
 ├── user/
 │   ├── messages.properties        # all messages owned by module `user`
-│   └── messages_id.properties
+│   └── messages_id.properties     # module `user` in Indonesian (required: every
+│                                  #   supported locale needs every module bundle)
 ├── order/
 │   ├── messages.properties
 │   └── messages_id.properties
@@ -389,10 +407,15 @@ Rules:
   fast).
 - **Default locale is English.** `WebConfig` (`platform/web`) registers an
   `AcceptHeaderLocaleResolver`: `Accept-Language` selects the language among
-  the configured supported locales (today only English); a missing or
-  unsupported header falls back to English, never to the system locale.
-  Extend the supported list only together with the matching
-  `messages_<lang>.properties` bundles.
+  the configured supported locales (**English and Indonesian (`id`)**, listed
+  in `WebConfig`); a missing or unsupported header falls back to English,
+  never to the system locale. Extend the supported list only together with
+  the matching `messages_<lang>.properties` bundles — for **every** module
+  folder, not just the app-wide one: a key without a translation in the
+  requested language falls back to English per key, which would mix languages
+  in one response. Shipping an app-wide bundle alone (like
+  `i18n/messages/messages_id.properties`) is not enough; the `user` example
+  shows the required per-module pairing.
 - **Validation messages flow through the same source.** Boot's auto-configured
   validator interpolates constraint messages against the context
   `messageSource` with the request locale (verified on Boot 4.1.1), so the
@@ -640,6 +663,14 @@ and read it via the other; watch the Quartz cluster in the logs.
   `acquireTriggersWithinLock: true` (recommended for PostgreSQL). Quartz
   guarantees each trigger fires on exactly one instance. **Never use
   `@Scheduled`** — every instance would fire. Scheduled work = Quartz job.
+- **Graceful shutdown for rolling deploys** — `server.shutdown: graceful`
+  plus `spring.lifecycle.timeout-per-shutdown-phase: 30s`: on SIGTERM an
+  instance stops accepting new requests, finishes in-flight ones and only
+  then closes the context (Quartz waits for running jobs via
+  `wait-for-jobs-to-complete-on-shutdown`).
+- **Caches — shared Redis, never in-process** (implemented, §2.4/§3):
+  eviction from mutating operations is transaction-aware and eventually
+  visible across instances; the TTL is the safety net (§11.2, rule 3).
 - **Modulith events — DB-backed registry.** Publishing an event writes one
   `event_publication` row per transactional listener **in the same transaction**
   (`V1__event_publication.sql`); completion is recorded after the listener ran.
@@ -681,11 +712,16 @@ and read it via the other; watch the Quartz cluster in the logs.
    `static` mutable state, no in-memory queues. MDC and request-scoped values
    never survive a request; async work (listeners, jobs) must set/restore MDC
    explicitly (§7).
-3. **Caching (later) must use Redis** — when `@Cacheable`/`@CacheEvict` are
-   added (requires `spring-boot-starter-cache` + `spring.cache.type: redis`,
-   configured once in `platform/config`), the store is shared Redis, never an
-   in-process cache: every instance must serve identical data. Cache only
-   read paths returning api DTO records.
+3. **Caching uses Redis** — implemented in `platform/config` (`CacheConfig`,
+   §2.4/§3): the store is shared Redis, never an in-process cache — every
+   instance must serve identical data. Cache only read paths returning api
+   DTO records, declared as `CacheSpec` beans in the owning module
+   (`internal/config`); mutating operations evict their caches
+   (`@CacheEvict`, transaction-aware). **Eviction is eventually visible**
+   across instances (the delete reaches the shared store asynchronously,
+   ms scale): no read-your-write guarantee from the cache within a request
+   after a mutation elsewhere — design stale tolerance (TTL safety net) and
+   let integration tests poll for eviction instead of asserting immediately.
 4. **Idempotent event listeners** (11.1) and idempotent jobs: effects that must
    happen exactly once need a DB-backed guard (e.g. unique constraint), not an
    in-memory flag.

@@ -12,12 +12,12 @@
  *
  * <p>Rules applied here — CLOSED module whose only public surface is the
  * named interface {@code API}; {@code allowedDependencies} stays empty because
- * the module only uses the shared {@code platform} module (implicitly allowed
- * via {@code @Modulith(sharedModules = "platform")}, see {@code agents.md}
- * §2.3/§2.4).
+ * the module only uses the shared {@code platform} module, which is implicitly
+ * allowed via {@code @Modulith(sharedModules = "platform")} and therefore
+ * never listed here (see {@code agents.md} §2.3/§2.4).
  */
 @org.springframework.modulith.ApplicationModule(
         id = "user",
-        allowedDependencies = {"platform"} // only the shared platform module is usable (implicit)
+        allowedDependencies = {"platform"} // only shared modules (platform) are allowed, implicitly
 )
 package com.gepe.starter.user;

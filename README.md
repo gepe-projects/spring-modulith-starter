@@ -13,16 +13,21 @@ fondasi platform (error-handling terpusat, i18n, logging terstruktur) dan
 
 - **Contoh modul bisnis `user`** (`com.gepe.starter.user`) — kecil tapi utuh:
   `api`/`internal` split, facade `UserApi`, entity + repository JPA, service
-  `@Transactional`, controller `/api/v1/users`, event domain + listener
-  AFTER_COMMIT, error enum modul, bundle i18n milik modul, migrasi Flyway.
+  `@Transactional`, controller `/api/v1/users`, read path di-cache Redis
+  (`@Cacheable` + `@CacheEvict`), event domain + listener AFTER_COMMIT, error
+  enum modul, bundle i18n milik modul (English + Indonesia), migrasi Flyway.
   Salin pola ini untuk modul berikutnya (lihat `agents.md` §9).
 - **Modul `platform`** (shared, OPEN): envelope API
   `{message, data}` / `{code, message, errors}`, `GlobalExceptionHandler`,
-  `ErrorCode` + `ServiceException`, agregasi `MessageSource` per-folder i18n,
-  filter MDC `requestId` (UUID v7), logback profil `json`.
+  `ErrorCode` + `ServiceException`, agregasi `MessageSource` per-folder i18n
+  (locale default English, Indonesia didukung via `Accept-Language`),
+  filter MDC `requestId` (UUID v7), logback profil `json`, dan cache Redis
+  (`platform/config`: `CacheManager` + deklarasi `CacheSpec` per modul,
+  TTL per cache, serializer JSON bertipe).
 - **Infrastruktur siap produksi**: PostgreSQL + JPA + Flyway (migrasi
-  `event_publication` & tabel Quartz sudah ada), Redis, Quartz JDBC-clustered,
-  Actuator health/readiness, UUID v7 di-generate aplikasi.
+  `event_publication` & tabel Quartz sudah ada), Redis (health + cache),
+  Quartz JDBC-clustered, Actuator health/readiness, graceful shutdown,
+  UUID v7 di-generate aplikasi.
 
 ## Stack
 
@@ -82,6 +87,8 @@ Jaminan (detail & aturan normatif di `agents.md` §11):
 
 - **Quartz clustered**: trigger hanya dijalankan satu instance (JDBC store
   + `isClustered`, `acquireTriggersWithinLock`).
+- **Graceful shutdown**: SIGTERM → berhenti terima request baru, tuntaskan
+  request in-flight, lalu tutup context (Quartz menunggu job selesai).
 - **Event modulith at-least-once**: tiap event ditulis ke `event_publication`
   dalam transaksi yang sama; instance yang crash meninggalkan baris
   *incomplete* → *staleness monitor* menandai `FAILED`, restart instance mana
@@ -92,7 +99,8 @@ Jaminan (detail & aturan normatif di `agents.md` §11):
   dijaga unique constraint + `flush()` di service, bukan pre-check yang bisa
   race. Migrasi Flyway aman jalan bersamaan (advisory lock Postgres).
 - **Instance stateless**: id UUID v7 di-generate aplikasi (tanpa urutan
-  bersama), tanpa cache in-memory — cache (nanti) wajib Redis.
+  bersama); cache read path memakai **Redis bersama** (bukan cache in-memory)
+  — eviction lintas-instance bersifat eventual, TTL adalah jaring pengaman.
 - **Dilarang**: `@Scheduled` (pakai Quartz), cache lokal, state di memory
   antar-request. `readiness` health berisi `db` + `redis`.
 
@@ -104,7 +112,8 @@ Jaminan (detail & aturan normatif di `agents.md` §11):
 3. `internal/`: `entity`, `repository`, `service`, `delivery/http` (+ `req`),
    `exception/<Modul>Error implements ErrorCode`, `listener`.
 4. `src/main/resources/i18n/<modul>/messages.properties` (key berprefix
-   `<modul>.`), migrasi Flyway bila ada tabel baru.
+   `<modul>.`; untuk locale Indonesia tambahkan `messages_id.properties`),
+   migrasi Flyway bila ada tabel baru.
 5. `./mvnw test` — `ModularityTests` wajib hijau.
 
 Pola lengkap: salin modul `user`. Konvensi detail: `agents.md` §2, §9.
@@ -115,19 +124,18 @@ Pola lengkap: salin modul `user`. Konvensi detail: `agents.md` §2, §9.
 src/main/java/com/gepe/starter/
 ├── SpringModulithStarterApplication.java   # @Modulith(sharedModules = "platform")
 ├── platform/        # shared infra (OPEN): web, exception, i18n, logging,
-│                    #   response, modulith (resubmission job)
+│                    #   response, config (cache Redis), modulith (resubmission job)
 └── user/            # contoh modul bisnis (CLOSED) — api/ + internal/
 src/main/resources/
-├── application.yaml  # config inti + multi-instance (Quartz, events, health)
+├── application.yaml  # config inti + multi-instance (Quartz, events, cache, health)
 ├── db/migration/     # V1 event_publication, V2 Quartz, V3 users
-├── i18n/             # messages/ (global) + user/ (milik modul)
+├── i18n/             # messages/ (global, en+id) + user/ (milik modul, en+id)
 └── logback-spring.xml
 ```
 
 ## Belum ada (planned)
 
-`Dockerfile`, `platform/config` (cache manager Redis, butuh
-`spring-boot-starter-cache`) & `platform/persistence` (`BaseEntity` + audit),
-contoh Quartz job lain, metrics Prometheus & tracing OTel (lihat `agents.md`
-§7), Spring Security (starter terpisah). Semua tercatat eksplisit di
-`agents.md`.
+`platform/persistence` (BaseEntity + audit), contoh Quartz job bisnis lain,
+pola pagination standar, `Dockerfile`, metrics Prometheus & tracing OTel
+(lihat `agents.md` §7), Spring Security (starter terpisah). Semua tercatat
+eksplisit di `agents.md`.

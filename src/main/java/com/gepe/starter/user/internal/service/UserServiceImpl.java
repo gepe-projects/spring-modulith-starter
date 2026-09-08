@@ -8,10 +8,13 @@ import com.gepe.starter.user.api.UserApi;
 import com.gepe.starter.user.api.dto.CreateUserCommand;
 import com.gepe.starter.user.api.dto.UserResponse;
 import com.gepe.starter.user.api.event.UserCreatedEvent;
+import com.gepe.starter.user.internal.config.UserCacheConfig;
 import com.gepe.starter.user.internal.entity.User;
 import com.gepe.starter.user.internal.exception.UserError;
 import com.gepe.starter.user.internal.repository.UserRepository;
 
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
@@ -26,6 +29,12 @@ import lombok.extern.slf4j.Slf4j;
  * (Lombok {@code @Slf4j}, parameterized messages, business milestones at
  * {@code info}, expected misses at {@code debug}); the MDC {@code requestId}
  * set by {@code CorrelationIdFilter} is present on every line.
+ *
+ * <p>Caching follows §3/§11.2: read paths are {@code @Cacheable} on the Redis
+ * cache declared in {@link UserCacheConfig} (values are api DTO records);
+ * mutating operations evict the affected cache. The manager is
+ * transaction-aware, so the eviction runs only after the commit — and because
+ * the store is shared Redis, every instance serves the same entries.
  */
 @Service
 @Slf4j
@@ -37,6 +46,7 @@ public class UserServiceImpl implements UserApi {
 
     @Override
     @Transactional
+    @CacheEvict(cacheNames = UserCacheConfig.USERS_BY_ID, allEntries = true)
     public UserResponse createUser(CreateUserCommand command) {
         User user = User.create(command.name(), command.email());
         userRepository.save(user);
@@ -56,6 +66,7 @@ public class UserServiceImpl implements UserApi {
 
     @Override
     @Transactional(readOnly = true)
+    @Cacheable(cacheNames = UserCacheConfig.USERS_BY_ID, key = "#id")
     public UserResponse getUser(UUID id) {
         return userRepository.findById(id)
                 .map(this::toResponse)

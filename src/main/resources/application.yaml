@@ -1,9 +1,15 @@
+# No profile is hard-coded: local defaults live right here behind ${VAR:default}
+# placeholders. Optional profiles are additive at runtime, e.g. the logback
+# `json` profile: SPRING_PROFILES_ACTIVE=json (see agents.md §7).
 spring:
   application:
     name: spring-modulith-starter
-  # No profile is hard-coded: local defaults live right here behind ${VAR:default}
-  # placeholders. Optional profiles are additive at runtime, e.g. the logback
-  # `json` profile: SPRING_PROFILES_ACTIVE=json (see agents.md §7).
+  # Graceful shutdown (multi-instance rolling deploys, agents.md §11): on SIGTERM
+  # the instance stops taking new requests, lets in-flight requests finish and
+  # waits up to the timeout below before closing the context (Quartz jobs wait
+  # via wait-for-jobs-to-complete-on-shutdown).
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/starter-modulith}
     username: ${SPRING_DATASOURCE_USERNAME:root}
@@ -36,10 +42,17 @@ spring:
           min-idle: 0
       username: ${SPRING_DATA_REDIS_USERNAME:root}
       password: ${SPRING_DATA_REDIS_PASSWORD:root}
-    # Caching (planned): when @Cacheable read paths are added, activate
-    # spring-boot-starter-cache + spring.cache.type: redis and configure a TTL
-    # in platform/config. The cache store MUST be Redis — never an in-process
-    # cache — so every instance serves the same data (agents.md §11).
+      # Redis is used as the shared CACHE store only — never as Spring Data
+      # repositories (no @RedisHash entities). Disabling the repository support
+      # silences the "strict repository configuration" startup noise that
+      # scanning JPA repositories with Spring Data Redis enabled would cause.
+      repositories:
+        enabled: false
+    # Caching: Redis-backed CacheManager configured once in platform/config
+    # (CacheConfig + module CacheSpec beans, agents.md §3/§11.2). The store is
+    # shared Redis — never an in-process cache — so every instance serves the
+    # same entries. Cache only read paths returning api DTO records; evict
+    # explicitly from mutating operations.
   quartz:
     job-store-type: jdbc
     jdbc:
@@ -80,6 +93,11 @@ spring:
         processing: 30m
         resubmitted: 10m
 
+# Graceful shutdown: stop accepting new requests first, then let in-flight
+# work finish (with spring.lifecycle.timeout-per-shutdown-phase above).
+server:
+  shutdown: graceful
+
 management:
   endpoints:
     web:
@@ -95,8 +113,8 @@ management:
           include:
             - readinessState
             - db
-            # Redis backs future caching (see above); include it so a lost
-            # Redis takes the instance out of the load balancer rotation.
+            # Redis is the shared cache store (platform CacheConfig): a lost
+            # Redis must take the instance out of load balancer rotation.
             - redis
   tracing:
     # Tracing is intentionally OFF in the starter (see agents.md §7 "Later

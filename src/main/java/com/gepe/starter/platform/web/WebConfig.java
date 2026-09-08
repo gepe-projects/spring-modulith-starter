@@ -14,8 +14,9 @@ import org.springframework.web.servlet.i18n.AcceptHeaderLocaleResolver;
  * <p>Locale policy (see §6): the language comes from the {@code Accept-Language}
  * header restricted to the configured supported locales; the default is English,
  * so a missing or unsupported header never falls back to the server/system
- * locale. Extend {@code supportedLocales} (e.g. {@code Locale.forLanguageTag("id")})
- * only together with the matching {@code messages_<lang>.properties} bundles.
+ * locale. Extend {@code supportedLocales} only together with the matching
+ * {@code messages_<lang>.properties} bundles — for every module bundle, not
+ * just the app-wide one (a key without translation falls back to English).
  */
 @Configuration
 public class WebConfig {
@@ -24,7 +25,7 @@ public class WebConfig {
     LocaleResolver localeResolver() {
         AcceptHeaderLocaleResolver resolver = new AcceptHeaderLocaleResolver();
         resolver.setDefaultLocale(Locale.ENGLISH);
-        resolver.setSupportedLocales(List.of(Locale.ENGLISH));
+        resolver.setSupportedLocales(List.of(Locale.ENGLISH, Locale.forLanguageTag("id")));
         return resolver;
     }
 }

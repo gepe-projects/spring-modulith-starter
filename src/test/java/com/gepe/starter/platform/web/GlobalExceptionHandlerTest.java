@@ -114,9 +114,19 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
-    void validationMessageFallsBackToEnglishForUnsupportedLocale() throws Exception {
+    void validationMessageResolvesIndonesianForTheIdLocale() throws Exception {
         mvc().perform(post("/stub/echo")
                         .header(HttpHeaders.ACCEPT_LANGUAGE, "id-ID")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"email\":\"gepe@example.com\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errors[0].message").value("tidak boleh kosong"));
+    }
+
+    @Test
+    void validationMessageFallsBackToEnglishForUnsupportedLocale() throws Exception {
+        mvc().perform(post("/stub/echo")
+                        .header(HttpHeaders.ACCEPT_LANGUAGE, "fr-FR")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"email\":\"gepe@example.com\"}"))
                 .andExpect(status().isBadRequest())

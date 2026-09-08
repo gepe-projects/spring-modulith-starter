@@ -11,6 +11,8 @@ import java.util.List;
 import java.util.UUID;
 
 import com.gepe.starter.platform.web.response.ValidationError;
+import com.gepe.starter.user.api.dto.UserResponse;
+import com.gepe.starter.user.internal.config.UserCacheConfig;
 import com.gepe.starter.user.internal.repository.UserRepository;
 
 import org.junit.jupiter.api.AfterEach;
@@ -18,6 +20,8 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.cache.Cache;
+import org.springframework.cache.CacheManager;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
@@ -52,11 +56,17 @@ class UserModuleIntegrationTest {
     @Autowired
     JdbcTemplate jdbcTemplate;
 
+    @Autowired
+    CacheManager cacheManager;
+
     @AfterEach
-    void cleanDatabase() {
+    void cleanDatabaseAndCaches() {
         // Keep the shared local dev database tidy for other tests/manual runs.
         userRepository.deleteAllInBatch();
         jdbcTemplate.update("DELETE FROM event_publication");
+        // The Redis cache store is shared and survives between tests/instances:
+        // drop every entry so the next test starts from the same state.
+        cacheManager.getCacheNames().forEach(name -> cacheManager.getCache(name).clear());
     }
 
     // ------------------------------------------------------------------
@@ -183,8 +193,75 @@ class UserModuleIntegrationTest {
     }
 
     // ------------------------------------------------------------------
+    // Redis cache (platform CacheConfig + user CacheSpec, agents.md §3/§11.2)
+    // ------------------------------------------------------------------
+
+    @Test
+    void readUserIsServedFromRedisCacheAndEvictedOnCreate() throws Exception {
+        // Create + read once → the entry is stored in the shared Redis cache
+        // (typed JSON round-trip through the module's CacheSpec).
+        String id = createUserAndReturnId("Budi", "cache@example.com");
+        mockMvc.perform(get(USERS_URL + "/" + id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.name").value("Budi"));
+
+        Cache cache = cacheManager.getCache(UserCacheConfig.USERS_BY_ID);
+        assertThat(cache).isNotNull();
+        // get(key, type) forces deserialization from Redis: proves the stored
+        // value is a UserResponse record again, not a JSON map.
+        Object cached = cache.get(UUID.fromString(id), UserResponse.class);
+        assertThat(cached).isEqualTo(new UserResponse(UUID.fromString(id), "Budi", "cache@example.com"));
+
+        // Served from Redis, not the DB: remove the row behind the cache and
+        // read again — only the cache can still answer 200.
+        userRepository.deleteById(UUID.fromString(id));
+        mockMvc.perform(get(USERS_URL + "/" + id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.name").value("Budi"));
+
+        // A new create evicts the whole users-by-id cache (allEntries).
+        // Eviction is eventually visible (shared Redis, several instances): the
+        // mutating request may return before the delete reaches the store, so
+        // wait briefly — exactly as a client would observe in production.
+        String otherId = createUserAndReturnId("Citra", "citra-cache@example.com");
+        awaitEviction(cache, UUID.fromString(id));
+        assertThat(cache.get(UUID.fromString(otherId))).isNull();
+        assertThat(cache.get(UUID.fromString(id))).isNull();
+        // ...so the deleted user is no longer served from cache: DB miss → 404.
+        mockMvc.perform(get(USERS_URL + "/" + id))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("user.not-found"));
+    }
+
+    // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
+
+    /** Creates a user through the API and returns its id from the envelope. */
+    private String createUserAndReturnId(String name, String email) throws Exception {
+        MvcResult result = mockMvc.perform(post(USERS_URL)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"%s","email":"%s"}""".formatted(name, email)))
+                .andExpect(status().isCreated())
+                .andReturn();
+        return com.jayway.jsonpath.JsonPath
+                .parse(result.getResponse().getContentAsString())
+                .read("$.data.id");
+    }
+
+    /**
+     * Waits until the eviction triggered by a mutating request has reached the
+     * shared Redis store (bounded; fails the test after the deadline). Cache
+     * invalidation across instances is inherently eventual — asserting
+     * immediately after the request would race the delete.
+     */
+    private static void awaitEviction(Cache cache, UUID key) throws InterruptedException {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+        while (cache.get(key) != null && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+    }
 
     /** Parses the {@code errors} array of an error envelope into validation errors. */
     private static List<ValidationError> fieldErrors(MvcResult result) throws Exception {

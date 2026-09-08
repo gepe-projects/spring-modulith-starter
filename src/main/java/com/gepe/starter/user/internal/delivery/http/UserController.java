@@ -46,11 +46,11 @@ public class UserController {
 
     @GetMapping("/{id}")
     public ApiResponse<UserResponse> getUser(@PathVariable UUID id) {
-        return new ApiResponse<>(null, userApi.getUser(id));
+        return new ApiResponse<>(messages.get("common.success"), userApi.getUser(id));
     }
 
     @GetMapping
     public ApiResponse<List<UserResponse>> getUsers() {
-        return new ApiResponse<>(null, userApi.getUsers());
+        return new ApiResponse<>(messages.get("common.success"), userApi.getUsers());
     }
 }
